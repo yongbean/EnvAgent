@@ -1,20 +1,21 @@
 """
-Environment Builder Agent (Improved).
-- Avoids hardcoding python=3.9
-- Infers minimum Python version from project / summary signals
-- Generates robust environment.yml via LLM
-- CRITICAL: Automatically translates pip names (torch) to conda names (pytorch)
+Environment Builder Agent (OS-Aware & Absolute Path).
+- Detects OS: Skips CUDA on macOS (Darwin), enables it on Linux.
+- Fixed Absolute Path: Uses absolute paths for pip install.
+- Robust Logic: Maps packages and infers versions.
 """
 
 import logging
 import re
+import yaml
+import platform  # 👈 [New] OS 확인을 위해 추가
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any, Dict
 
 from openai import OpenAI
 
 from config.settings import settings
-from utils.helpers import sanitize_env_name
+from utils import sanitize_env_name
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class EnvironmentBuilder:
     """Builds a Conda environment.yml file from analysis results."""
 
     # ------------------------------------------------------------------
-    # 🧠 PROMPT FOR SUMMARY (FROM CODE SCANNER)
+    # 🧠 PROMPT FOR SUMMARY (Mac/Linux 대응 추가)
     # ------------------------------------------------------------------
     BUILD_FROM_SUMMARY_PROMPT = """
 You are a Senior DevOps Engineer.
@@ -40,28 +41,30 @@ Your task is to create a robust `environment.yml` file based on the provided dep
 ### 🚨 STRICT RULES
 
 1. **CRITICAL: PACKAGE MAPPING (TRANSLATION):**
-   - **`torch`** → **`pytorch`** (Conda uses `pytorch`, NOT `torch`)
+   - **`torch`** → **`pytorch`**
    - **`opencv-python`** / `cv2` → **`opencv`**
    - **`Pillow`** → **`pillow`**
-   - **`scikit-learn`** → **`scikit-learn`** (Check spelling)
-   - **`protobuf`** → **`libprotobuf`** (If needed) or `protobuf`
+   - **`scikit-learn`** → **`scikit-learn`**
+   - **`protobuf`** → **`libprotobuf`**
 
-2. **PYTHON VERSION POLICY:**
-   - Keep the provided Python version ({python_version}) as the default target.
-   - Do not raise it arbitrarily unless absolutely necessary for compatibility.
+2. **OS SPECIFIC RULES (CRITICAL):**
+   - If CUDA Requirement says **"macOS"** or **"None"**:
+     - **DO NOT** include `cudatoolkit`, `cuda`, `nvidia`, `ncc` packages.
+     - **DO NOT** include `nvidia` channel.
+     - Just install `pytorch` (It automatically supports MPS on macOS).
 
 3. **CHANNEL PRIORITY:**
-   - **`pytorch`** (First priority for torch)
-   - **`nvidia`** (If CUDA/GPU is needed)
+   - **`pytorch`**
+   - **`nvidia`** (ONLY if CUDA is required and NOT macOS)
    - `conda-forge`
    - `defaults`
 
 4. **OUTPUT FORMAT:**
-   - Return ONLY raw YAML (no markdown, no explanations).
+   - Return ONLY raw YAML (no markdown).
 """
 
     # ------------------------------------------------------------------
-    # 🧠 PROMPT FOR EXISTING FILES (REQUIREMENTS.TXT / SETUP.PY)
+    # 🧠 PROMPT FOR EXISTING FILES
     # ------------------------------------------------------------------
     BUILD_FROM_EXISTING_FILES_PROMPT = """
 You are a Senior DevOps Engineer.
@@ -76,49 +79,20 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
 
 ### 🚨 STRICT RULES
 
-1. **CRITICAL: PACKAGE NORMALIZATION (Pip -> Conda):**
-   - You **MUST** translate Pip package names to Conda equivalents:
-   - **`torch`** → **`pytorch`** (MANDATORY)
+1. **CRITICAL: PACKAGE NORMALIZATION:**
+   - **`torch`** → **`pytorch`**
    - **`opencv-python`** → **`opencv`**
-   - **`tensorflow-gpu`** → **`tensorflow`**
-   - **`Pillow`** → **`pillow`**
+   - **`tensorflow-gpu`** → **`tensorflow`** (Let Conda handle GPU)
 
-2. **VERSION HANDLING:**
-   - Preserve version constraints (e.g., `numpy>=1.20` stays `numpy>=1.20`)
-   - But if you see `==` for libraries like numpy/pandas, consider loosening to `>=` to avoid conflicts.
+2. **OS SPECIFIC:**
+   - If building for macOS (Implicit), do not force `cudatoolkit`.
 
-3. **CHANNEL PRIORITY:**
-   - channels:
-     - pytorch
-     - nvidia
-     - conda-forge
-     - defaults
-
-4. **PIP FALLBACK:**
-   - If a package is definitely NOT in Conda (e.g., `thop`, `auto-gpt-libs`), put it under the `- pip:` section.
-
-5. **OUTPUT FORMAT:**
+3. **OUTPUT FORMAT:**
    - Return ONLY raw YAML.
-   - No markdown, no explanations.
-   - Structure:
-     ```yaml
-     name: {project_name}
-     channels:
-       - pytorch
-       - nvidia
-       - conda-forge
-       - defaults
-     dependencies:
-       - python={python_version}
-       - pytorch  # Example of mapped name
-       - opencv   # Example of mapped name
-       - pip:
-         - some-pip-only-package
-     ```
+   - No markdown.
 """
 
     # ---- Heuristic triggers for minimum Python versions ----
-    # match/case -> 3.10+
     _PY310_PATTERNS = [
         re.compile(r"^\s*match\s+.+:\s*$", re.MULTILINE),
         re.compile(r"^\s*case\s+.+:\s*$", re.MULTILINE),
@@ -144,14 +118,13 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
         logger.info(f"Building environment.yml from summary: {summary_path}")
 
         summary_content = self._read_text(summary_path)
-
         sanitized_name = sanitize_env_name(project_name)
         logger.info(f"Using sanitized environment name: {sanitized_name}")
 
-        # CUDA hint
+        # [New] CUDA hint with OS check
         cuda_version = self._infer_cuda(summary_content)
 
-        # Python version inference (avoid fixed default 3.9)
+        # Python version inference
         inferred_py = self._infer_python_version(
             summary_content=summary_content,
             repo_root=repo_root
@@ -177,10 +150,13 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
         self,
         collected_content: str,
         project_name: str = "my_project",
-        python_version: str = "3.9"
+        python_version: str = "3.9",
+        target_directory: Optional[str] = None,
+        root_directory: Optional[str] = None
     ) -> str:
         """
         Generate environment.yml content from existing environment files.
+        Injects ABSOLUTE PATH installation command to prevent path errors.
         """
         logger.info("Building environment.yml from existing environment files...")
 
@@ -193,37 +169,81 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
             collected_content=collected_content
         )
 
+        # 1. Generate Raw YAML
         env_content = self._call_llm(prompt)
         env_content = self._clean_markdown(env_content)
+        
+        # 2. Inject Absolute Path Logic
+        if target_directory:
+            env_content = self._inject_relative_path_install(
+                yaml_content=env_content, 
+                target_dir=target_directory, 
+                root_dir=root_directory
+            )
+
+        # 3. Ensure Python Version
         env_content = self._ensure_python_dep(env_content, python_version)
 
         logger.info("Successfully generated environment.yml from existing files")
         return env_content
 
     # ----------------------------
-    # Inference helpers
+    # Helper: Monorepo Path Injection (ABSOLUTE PATH FIX)
+    # ----------------------------
+    def _inject_relative_path_install(self, yaml_content: str, target_dir: str, root_dir: Optional[str] = None) -> str:
+        try:
+            target_path = Path(target_dir).resolve()
+            install_cmd = f"-e {str(target_path)}"
+            logger.info(f"🔧 Monorepo: Injecting ABSOLUTE installation command '{install_cmd}'")
+
+            data = yaml.safe_load(yaml_content)
+            
+            if "dependencies" not in data:
+                data["dependencies"] = []
+            
+            pip_list = None
+            for item in data["dependencies"]:
+                if isinstance(item, dict) and "pip" in item:
+                    pip_list = item["pip"]
+                    break
+            
+            if pip_list is None:
+                pip_list = []
+                data["dependencies"].append({"pip": pip_list})
+
+            if "-e ." in pip_list:
+                pip_list.remove("-e .")
+            
+            if install_cmd not in pip_list:
+                pip_list.append(install_cmd)
+            
+            return yaml.dump(data, sort_keys=False)
+
+        except Exception as e:
+            logger.error(f"Failed to inject absolute path: {e}")
+            return yaml_content
+
+    # ----------------------------
+    # Helper: Inference Logic (OS 감지 추가됨!)
     # ----------------------------
     def _infer_cuda(self, summary_content: str) -> str:
+        # [New] OS가 Mac(Darwin)이면 CUDA를 강제로 끕니다.
+        if platform.system() == "Darwin":
+            logger.info("🍎 macOS detected! Skipping CUDA requirements.")
+            return "None (macOS detected - CUDA not supported, uses MPS/CPU)"
+            
         if "CUDA Required: Yes" in summary_content or "True" in summary_content:
             return "CUDA 11.8 (Auto-detected)"
         return "Not specified"
 
     def _infer_python_version(self, summary_content: str, repo_root: Optional[str]) -> str:
-        """
-        Conservative inference:
-        - If repo contains match/case -> >=3.10
-        - If summary contains a python requirement hint -> use that
-        - Else default to a modern safe baseline (3.11)
-        """
         hint = self._extract_python_hint_from_summary(summary_content)
-        if hint:
-            return hint
+        if hint: return hint
 
         if repo_root:
             try:
                 min_ver = self._scan_repo_for_min_python(repo_root)
-                if min_ver:
-                    return min_ver
+                if min_ver: return min_ver
             except Exception as e:
                 logger.warning(f"Python version inference scan failed: {e}")
 
@@ -238,25 +258,28 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
         return None
 
     def _scan_repo_for_min_python(self, repo_root: str) -> Optional[str]:
-        root = Path(repo_root)
-        if not root.exists(): return None
+        try:
+            root = Path(repo_root)
+            if not root.exists(): return None
 
-        candidates = []
-        for p in [root / "conftest.py", root / "tests"]:
-            if p.exists():
-                if p.is_file(): candidates.append(p)
-                else: candidates.extend(list(p.rglob("*.py")))
+            candidates = []
+            for p in [root / "conftest.py", root / "tests"]:
+                if p.exists():
+                    if p.is_file(): candidates.append(p)
+                    else: candidates.extend(list(p.rglob("*.py")))
 
-        if not candidates:
-            candidates = list(root.rglob("*.py"))[:500]
+            if not candidates:
+                candidates = list(root.rglob("*.py"))[:500]
 
-        for pyfile in candidates:
-            try:
-                text = self._read_text(str(pyfile))
-                if any(rx.search(text) for rx in self._PY310_PATTERNS):
-                    return "3.10"
-            except Exception:
-                continue
+            for pyfile in candidates:
+                try:
+                    text = self._read_text(str(pyfile))
+                    if any(rx.search(text) for rx in self._PY310_PATTERNS):
+                        return "3.10"
+                except Exception:
+                    continue
+        except Exception:
+            pass
         return None
 
     def _choose_python_version(self, user_version: Optional[str], inferred_version: str) -> str:

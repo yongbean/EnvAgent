@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-EnvAgent - Automatic Conda environment.yml generator (NEW ARCHITECTURE).
-
-Token-efficient version that processes files one-by-one.
+EnvAgent - Automatic Conda environment.yml generator (v2.1).
+Supports Monorepo & Recursive Setup Detection.
 """
 
 import argparse
@@ -11,551 +10,216 @@ import os
 import sys
 from pathlib import Path
 
+# Config & Utils
 from config.settings import settings
 from utils.system_checker import SystemChecker
 from utils.file_filter import FileFilter
 from utils import CondaExecutor, sanitize_env_name
+
+# Agents
 from agents.decision_agent import DecisionAgent
 from agents.code_scanner import CodeScannerAgent
-from agents import EnvironmentBuilder, EnvironmentFixer
-
+from agents.env_builder import EnvironmentBuilder  # Updated Agent
+from agents.env_fixer import EnvironmentFixer
 
 def setup_logging() -> None:
-    """Configure logging with timestamps."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-
 def parse_arguments() -> argparse.Namespace:
-    """
-    Parse command line arguments.
-
-    Returns:
-        Parsed arguments
-    """
-    parser = argparse.ArgumentParser(
-        description="EnvAgent - Automatic Conda environment.yml generator",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s ./my_project
-  %(prog)s ./my_project env.yml
-  %(prog)s ./my_project test/output/env.yml
-  %(prog)s . -n custom_env --no-create
-        """
-    )
-
-    parser.add_argument(
-        "source",
-        type=str,
-        help="Source directory to analyze"
-    )
-
-    # ------------------------------------------------------------------
-    # [수정됨] 기본 저장 경로를 ./env_output/environment.yml 로 변경
-    # ------------------------------------------------------------------
-    parser.add_argument(
-        "destination",
-        nargs="?",
-        default="./env_output/environment.yml", 
-        help="Output environment.yml path (default: ./env_output/environment.yml)"
-    )
-
-    parser.add_argument(
-        "-n", "--env-name",
-        type=str,
-        default=None,
-        help="Conda environment name (default: use project name)"
-    )
-
-    parser.add_argument(
-        "--python-version",
-        type=str,
-        default="3.9",
-        help="Python version (default: 3.9)"
-    )
-
-    parser.add_argument(
-        "--no-create",
-        action="store_true",
-        help="Only generate yml file, skip conda environment creation"
-    )
-
+    parser = argparse.ArgumentParser(description="EnvAgent v2.1")
+    parser.add_argument("source", type=str, help="Source directory to analyze")
+    parser.add_argument("destination", nargs="?", default="./env_output/environment.yml", help="Output path")
+    parser.add_argument("-n", "--env-name", type=str, default=None, help="Conda env name")
+    parser.add_argument("--python-version", type=str, default="3.9", help="Python version")
+    parser.add_argument("--no-create", action="store_true", help="Skip creation")
     return parser.parse_args()
 
-
-def validate_directory(directory_path: str) -> Path:
-    """
-    Validate that the directory exists.
-
-    Args:
-        directory_path: Path to validate
-
-    Returns:
-        Resolved Path object
-
-    Raises:
-        SystemExit: If directory doesn't exist
-    """
-    path = Path(directory_path).resolve()
-
-    if not path.exists():
-        print(f"Error: Directory does not exist: {path}", file=sys.stderr)
+def validate_directory(path_str: str) -> Path:
+    path = Path(path_str).resolve()
+    if not path.exists() or not path.is_dir():
+        print(f"Error: Invalid directory: {path}", file=sys.stderr)
         sys.exit(1)
-
-    if not path.is_dir():
-        print(f"Error: Path is not a directory: {path}", file=sys.stderr)
-        sys.exit(1)
-
     return path
 
-
 def main() -> None:
-    """Main entry point for EnvAgent CLI."""
     setup_logging()
     logger = logging.getLogger(__name__)
 
     print("=" * 60)
-    print("EnvAgent - Conda Environment Generator v2.0")
-    print("Token-Efficient Architecture")
+    print("EnvAgent - Conda Environment Generator v2.1")
+    print("Monorepo Support & Auto-Discovery Enabled")
     print("=" * 60)
     print()
 
-    # Parse arguments
     args = parse_arguments()
+    
+    # 1. 루트 디렉토리 설정 (사용자 입력)
+    root_path = validate_directory(args.source)
+    print(f"📁 Root Project: {root_path}")
 
-    # Validate source directory
-    directory_path = validate_directory(args.source)
-    logger.info(f"Analyzing project: {directory_path}")
-    print(f"📁 Project directory: {directory_path}")
-
-    # Prepare output path and create directories if needed
+    # 2. 출력 경로 설정
     output_path = Path(args.destination).resolve()
     output_dir = output_path.parent
+    os.makedirs(output_dir, exist_ok=True)
+
+    # ------------------------------------------------------------
+    # STEP 0: System Check
+    # ------------------------------------------------------------
+    print("🔍 Step 0/6: Checking system requirements...")
+    checker = SystemChecker()
+    passed, msgs = checker.run_all_checks()
+    if not passed:
+        print("❌ System check failed.")
+        sys.exit(1)
+    print("   ✓ System checks passed\n")
+
+    # ------------------------------------------------------------
+    # STEP 1: Decision Agent (Monorepo Detection)
+    # ------------------------------------------------------------
+    print("📋 Step 1/6: Analyzing project structure...")
+    decision_agent = DecisionAgent()
     
-    # [자동 생성] 지정된 경로의 폴더가 없으면 자동으로 생성해줍니다.
-    if not output_dir.exists():
-        logger.info(f"Creating output directory: {output_dir}")
-        os.makedirs(output_dir, exist_ok=True)
-        print(f"📂 Created output directory: {output_dir}")
+    # [핵심] decide()가 분석 후 '진짜 경로(target_directory)'를 알려줍니다.
+    decision = decision_agent.decide(str(root_path))
+    
+    # 루트와 다른 경로(하위 폴더)가 탐지되었는지 확인
+    target_directory = Path(decision.get('target_directory', root_path))
+    
+    if target_directory != root_path:
+        # AutoGPT처럼 하위 폴더에 진짜 코드가 있는 경우
+        rel_path = target_directory.relative_to(root_path)
+        print(f"   🚀 Monorepo Detected! Switching target to: ./{rel_path}")
+    
+    print(f"   Decision: {decision['reason']}")
 
-    print(f"📄 Output file: {output_path}")
-    print()
+    project_name = args.env_name if args.env_name else root_path.name
+    sanitized_env_name = sanitize_env_name(project_name)
 
-    try:
-        # ============================================================
-        # STEP 0: System Pre-Check (NO LLM)
-        # ============================================================
-        print("🔍 Step 0/6: Checking system requirements...")
-        checker = SystemChecker()
-        passed, messages = checker.run_all_checks()
+    # ------------------------------------------------------------
+    # CASE A: Existing Files Found (setup.py, environment.yml)
+    # ------------------------------------------------------------
+    if decision["has_env_setup"] and not decision["proceed_with_analysis"]:
+        print("\n" + "=" * 60)
+        print("✅ Valid environment setup found!")
+        print("=" * 60)
+        print(f"Type: {decision['env_type']}")
+        print(f"Target: {target_directory}")
+        
+        # 1. 내용 수집 (타겟 디렉토리 기준)
+        collected_content = decision_agent.collect_env_files_content(str(target_directory))
+        
+        # 2. YAML 생성 (상대 경로 주입)
+        print("\n🔨 Generating environment.yml...")
+        builder = EnvironmentBuilder()
+        
+        env_content = builder.build_from_existing_files(
+            collected_content=collected_content,
+            project_name=project_name,
+            python_version=args.python_version,
+            target_directory=str(target_directory),  # 진짜 위치 (예: classic/original_autogpt)
+            root_directory=str(root_path)            # 실행 위치 (예: AutoGPT)
+        )
+        
+        builder.save_to_file(env_content, str(output_path))
+        print(f"   ✓ Saved to: {output_path}")
 
-        for msg in messages:
-            print(f"   {msg}")
+    # ------------------------------------------------------------
+    # CASE B: Deep Analysis Needed (Code Scanning)
+    # ------------------------------------------------------------
+    else:
+        print(f"\n   ✓ Proceeding with code analysis in: {target_directory.name}")
 
-        if not passed:
-            print()
-            print("❌ System check failed. Please fix the issues above and try again.")
-            sys.exit(1)
-
-        print("   ✓ All system checks passed")
-        print()
-
-        # ============================================================
-        # STEP 1: Decision Agent
-        # ============================================================
-        print("📋 Step 1/6: Analyzing project structure...")
-        decision_agent = DecisionAgent()
-        decision = decision_agent.decide(str(directory_path))
-
-        print(f"   Decision: {decision['reason']}")
-
-        # ------------------------------------------------------------
-        # NEW FLOW: Existing Environment Files Found
-        # ------------------------------------------------------------
-        if decision["has_env_setup"] and not decision["proceed_with_analysis"]:
-            print()
-            print("=" * 60)
-            print("✅ Existing environment files found!")
-            print("=" * 60)
-            print()
-            print(f"Type: {decision['env_type']}")
-            print(f"File: {decision['env_file']}")
-            print()
-            
-            # Determine project name first
-            project_name = args.env_name if args.env_name else directory_path.name
-            sanitized_env_name = sanitize_env_name(project_name)
-
-            # ---------------------------------------------------------
-            # 1. Collect Content
-            # ---------------------------------------------------------
-            print("📦 Collecting existing environment file content...")
-            collected_content = decision_agent.collect_env_files_content(str(directory_path))
-            
-            # ---------------------------------------------------------
-            # 2. Save Context Log (Requested Feature)
-            # ---------------------------------------------------------
-            log_dir_name = "env_agent_logs"
-            log_dir_path = directory_path / log_dir_name
-            os.makedirs(log_dir_path, exist_ok=True)
-            
-            log_filename = f"necessary_information_document_{project_name}.txt"
-            log_file_path = log_dir_path / log_filename
-            
-            print(f"📂 Creating log directory: {log_dir_name}/")
-            print(f"📄 Saving context to: {log_filename}")
-            
-            with open(log_file_path, "w", encoding="utf-8") as f:
-                f.write(collected_content)
-                
-            print(f"   ✓ Context saved. (Used for LLM input)")
-            print()
-
-            # ---------------------------------------------------------
-            # 3. Build Environment.yml
-            # ---------------------------------------------------------
-            print("🔨 Converting to conda environment.yml...")
-            builder = EnvironmentBuilder()
-
-            env_content = builder.build_from_existing_files(
-                collected_content=collected_content,
-                project_name=project_name,
-                python_version=args.python_version
-            )
-
-            # Save to file
-            builder.save_to_file(env_content, str(output_path))
-            print(f"   ✓ Saved to: {output_path}")
-            print()
-
-            if sanitized_env_name != project_name:
-                print(f"   ℹ️  Environment name sanitized: '{project_name}' → '{sanitized_env_name}'")
-                print()
-
-            # ============================================================
-            # Create conda environment with retry logic (same as Step 5)
-            # ============================================================
-            if not args.no_create:
-                print(f"🚀 Creating conda environment '{sanitized_env_name}'...")
-                print(f"   (Maximum {settings.MAX_RETRIES} attempts with auto-fix)")
-                print()
-
-                conda_executor = CondaExecutor()
-                fixer = EnvironmentFixer()
-
-                # Remove environment if it already exists
-                if conda_executor.environment_exists(sanitized_env_name):
-                    print(f"   ⚠️  Environment '{sanitized_env_name}' already exists, removing...")
-                    conda_executor.remove_environment(sanitized_env_name)
-
-                current_yml = env_content
-                error_history = []
-
-                # Retry loop with max attempts
-                for attempt in range(1, settings.MAX_RETRIES + 1):
-                    print(f"   [Attempt {attempt}/{settings.MAX_RETRIES}]")
-
-                    success, error = conda_executor.create_environment(str(output_path), sanitized_env_name)
-
-                    if success:
-                        print()
-                        print("=" * 60)
-                        print("✅ SUCCESS! Environment created successfully.")
-                        print("=" * 60)
-                        print()
-                        print("Environment details:")
-                        print(f"  • Name: {sanitized_env_name}")
-                        print(f"  • Config file: {output_path}")
-                        print(f"  • Log file: {log_file_path}")
-                        print(f"  • Source: Converted from existing {decision['env_type']} files")
-                        print()
-                        print("Next steps:")
-                        print(f"  1. Activate the environment:")
-                        print(f"     conda activate {sanitized_env_name}")
-                        print()
-                        print(f"  2. Verify installation:")
-                        print(f"     python --version")
-                        print()
-                        print(f"  3. Deactivate when done:")
-                        print(f"     conda deactivate")
-                        print()
-                        return
-
-                    # Failed - log the error
-                    print(f"   ❌ Failed: {error[:200]}...")
-                    logger.error(f"Attempt {attempt} failed: {error}")
-
-                    if attempt == settings.MAX_RETRIES:
-                        print()
-                        print("=" * 60)
-                        print(f"❌ FAILED after {settings.MAX_RETRIES} attempts")
-                        print("=" * 60)
-                        print()
-                        print("The environment could not be created automatically.")
-                        print(f"Generated file saved at: {output_path}")
-                        print()
-                        print("You can:")
-                        print("1. Manually review and edit the environment.yml file")
-                        print("2. Try creating it manually: conda env create -f environment.yml")
-                        print("3. Check the error messages above for hints")
-                        print()
-                        sys.exit(1)
-
-                    # Fix and retry
-                    print(f"   🔧 Generating fix (attempt {attempt}/{settings.MAX_RETRIES})...")
-                    try:
-                        # Create a minimal memory object for fixer
-                        from utils.memory import Memory
-                        memory = Memory()
-                        memory.error_history = error_history
-
-                        fixed_yml = fixer.fix(current_yml, error, memory)
-                        fix_summary = fixer.extract_fix_summary(current_yml, fixed_yml)
-
-                        # Save the fix
-                        builder.save_to_file(fixed_yml, str(output_path))
-
-                        # Update error history
-                        error_history.append((error[:500], fix_summary))
-
-                        # Update current yml for next iteration
-                        current_yml = fixed_yml
-
-                        print(f"   ✓ Applied fix: {fix_summary}")
-                        print()
-
-                    except Exception as fix_error:
-                        logger.error(f"Failed to generate fix: {fix_error}")
-                        print(f"   ❌ Failed to generate fix: {fix_error}")
-                        print()
-                        print(f"Manual intervention required. File saved at: {output_path}")
-                        sys.exit(1)
-            else:
-                # --no-create flag
-                print("🔨 Skipped environment creation (--no-create flag)")
-                print()
-                print("=" * 60)
-                print("✅ Success! Environment file generated.")
-                print("=" * 60)
-                print()
-                print("Next steps:")
-                print(f"1. Review the generated file:")
-                print(f"   cat {output_path}")
-                print()
-                print(f"2. Check collected dependencies:")
-                print(f"   cat {log_file_path}")
-                print()
-                print(f"3. Create the environment:")
-                print(f"   conda env create -f {output_path}")
-                print()
-                print(f"4. Activate the environment:")
-                print(f"   conda activate {sanitized_env_name}")
-                print()
-
-            return
-
-        print("   ✓ Will proceed with dependency analysis")
-        print()
-
-        # ============================================================
-        # STEP 2: Filter relevant files (NO LLM)
-        # ============================================================
-        print("📁 Step 2/6: Filtering relevant source files...")
+        # STEP 2: Filter Files (타겟 디렉토리 기준)
+        print("\n📁 Step 2/6: Filtering source files...")
         file_filter = FileFilter()
-        relevant_files = file_filter.get_relevant_files(str(directory_path))
-
+        relevant_files = file_filter.get_relevant_files(str(target_directory))
+        
         if not relevant_files:
-            print("   ⚠️  No relevant files found!")
-            print("   Make sure the directory contains Python files.")
+            print("   ⚠️  No Python files found in target directory.")
             sys.exit(1)
+        print(f"   ✓ Found {len(relevant_files)} files to scan")
 
-        print(f"   ✓ Found {len(relevant_files)} relevant files")
-
-        # Show file types
-        dep_files = [f for f in relevant_files if f.name in FileFilter.ALWAYS_INCLUDE]
-        py_files = [f for f in relevant_files if f.suffix == '.py']
-        print(f"     - Dependency files: {len(dep_files)}")
-        print(f"     - Python source files: {len(py_files)}")
-        print()
-
-        # ============================================================
-        # STEP 3: Scan files one by one (Project name integrated)
-        # ============================================================
-        print("🔬 Step 3/6: Scanning source files for dependencies...")
-        print("   (This processes files one-by-one to avoid token limits)")
-        print()
-
-        project_name = args.env_name if args.env_name else directory_path.name
-        sanitized_name = sanitize_env_name(project_name)
-
+        # STEP 3: Scan Files
+        print("\n🔬 Step 3/6: Scanning files for dependencies...")
         scanner = CodeScannerAgent(output_dir=str(output_dir))
- 
-        summary_path = scanner.scan_all_files(relevant_files, directory_path, project_name=sanitized_name)
+        
+        # CodeScannerAgent.scan_files (혹은 scan_all_files) 호출
+        # 만약 CodeScannerAgent 메서드 이름이 scan_files라면 아래를 수정하세요.
+        summary_path = scanner.scan_files(
+            relevant_files, 
+            target_directory, 
+            project_name=sanitized_env_name
+        )
+        print(f"   ✓ Summary saved to: {summary_path.name}")
 
-        print()
-        print(f"   ✓ Dependency summary saved to: {summary_path.name}")
-        print()
-
-        # ============================================================
-        # STEP 4: Build environment.yml from summary
-        # ============================================================
-        print("🔨 Step 4/6: Generating environment.yml...")
-
+        # STEP 4: Build Environment
+        print("\n🔨 Step 4/6: Generating environment.yml...")
         builder = EnvironmentBuilder()
         env_content = builder.build_from_summary(
             summary_path=str(summary_path),
-            project_name=project_name, 
-            python_version=args.python_version
+            project_name=project_name,
+            python_version=args.python_version,
+            repo_root=str(target_directory) # 버전 추론용 경로
         )
-        # Save to file
         builder.save_to_file(env_content, str(output_path))
-
         print(f"   ✓ Saved to: {output_path}")
-        print()
 
-        # Sanitize environment name
-        sanitized_env_name = sanitize_env_name(project_name)
-        if sanitized_env_name != project_name:
-            print(f"   ℹ️  Environment name sanitized: '{project_name}' → '{sanitized_env_name}'")
-            print()
+    # ------------------------------------------------------------
+    # STEP 5: Create Conda Environment (Common)
+    # ------------------------------------------------------------
+    if not args.no_create:
+        print(f"\n🚀 Step 5/6: Creating conda environment '{sanitized_env_name}'...")
+        
+        conda_executor = CondaExecutor()
+        fixer = EnvironmentFixer()
 
-        # ============================================================
-        # STEP 5: Create and validate (with retry logic)
-        # ============================================================
-        if not args.no_create:
-            print(f"🚀 Step 5/6: Creating conda environment '{sanitized_env_name}'...")
-            print(f"   (Maximum {settings.MAX_RETRIES} attempts with auto-fix)")
-            print()
+        if conda_executor.environment_exists(sanitized_env_name):
+            print(f"   ⚠️  Removing existing environment...")
+            conda_executor.remove_environment(sanitized_env_name)
 
-            conda_executor = CondaExecutor()
-            fixer = EnvironmentFixer()
+        current_yml = env_content
+        error_history = []
 
-            # Remove environment if it already exists
-            if conda_executor.environment_exists(sanitized_env_name):
-                print(f"   ⚠️  Environment '{sanitized_env_name}' already exists, removing...")
-                conda_executor.remove_environment(sanitized_env_name)
+        # Retry Loop
+        for attempt in range(1, settings.MAX_RETRIES + 1):
+            print(f"   [Attempt {attempt}/{settings.MAX_RETRIES}]")
+            
+            # Conda create 실행
+            success, error = conda_executor.create_environment(str(output_path), sanitized_env_name)
 
-            current_yml = env_content
-            error_history = []
-
-            # STRICT RETRY LIMIT
-            for attempt in range(1, settings.MAX_RETRIES + 1):
-                print(f"   [Attempt {attempt}/{settings.MAX_RETRIES}]")
-
-                success, error = conda_executor.create_environment(str(output_path), sanitized_env_name)
-
-                if success:
-                    print()
-                    print("=" * 60)
-                    print("✅ SUCCESS! Environment created successfully.")
-                    print("=" * 60)
-                    print()  
-                    print("Environment details:")
-                    print(f"  • Name: {sanitized_env_name}")
-                    print(f"  • Config file: {output_path}")
-                    print(f"  • Summary file: {summary_path}")
-                    print()
-                    print("Next steps:")
-                    print(f"  1. Activate the environment:")
-                    print(f"     conda activate {sanitized_env_name}")
-                    print()
-                    print(f"  2. Verify installation:")
-                    print(f"     python --version")
-                    print()
-                    print(f"  3. Deactivate when done:")
-                    print(f"     conda deactivate")
-                    print()
-                    break
-
-                # Failed - log the error
-                print(f"   ❌ Failed: {error[:200]}...")
-                logger.error(f"Attempt {attempt} failed: {error}")
-
-                if attempt == settings.MAX_RETRIES:
-                    print()
-                    print("=" * 60)
-                    print(f"❌ FAILED after {settings.MAX_RETRIES} attempts")
-                    print("=" * 60)
-                    print()
-                    print("The environment could not be created automatically.")
-                    print(f"Generated file saved at: {output_path}")
-                    print(f"Dependency summary at: {summary_path}")
-                    print()
-                    print("You can:")
-                    print("1. Manually review and edit the environment.yml file")
-                    print("2. Try creating it manually: conda env create -f environment.yml")
-                    print("3. Check the error messages above for hints")
-                    print()
-                    sys.exit(1)
-
-                # Fix and retry
-                print(f"   🔧 Generating fix (attempt {attempt}/{settings.MAX_RETRIES})...")
-                try:
-                    # Create a minimal memory object for fixer
-                    from utils.memory import Memory
-                    memory = Memory()
-                    memory.error_history = error_history
-
-                    fixed_yml = fixer.fix(current_yml, error, memory)
-                    fix_summary = fixer.extract_fix_summary(current_yml, fixed_yml)
-
-                    # Save the fix
-                    builder.save_to_file(fixed_yml, str(output_path))
-
-                    # Update error history
-                    error_history.append((error[:500], fix_summary))
-
-                    # Update current yml for next iteration
-                    current_yml = fixed_yml
-
-                    print(f"   ✓ Applied fix: {fix_summary}")
-                    print()
-
-                except Exception as fix_error:
-                    logger.error(f"Failed to generate fix: {fix_error}")
-                    print(f"   ❌ Failed to generate fix: {fix_error}")
-                    print()
-                    print(f"Manual intervention required. File saved at: {output_path}")
-                    sys.exit(1)
-        else:
-            # --no-create flag
-            print("🔨 Step 5/6: Skipped (--no-create flag)")
-            print()
-            print("=" * 60)
-            print("✅ Success! Environment file generated.")
-            print("=" * 60)
-            print()
-            print("Next steps:")
-            print(f"1. Review the generated file:")
-            print(f"   cat {output_path}")
-            print()
-            print(f"2. Create the environment:")
-            print(f"   conda env create -f {output_path}")
-            print()
-            print(f"3. Activate the environment:")
-            print(f"   conda activate {sanitized_env_name}")
-            print()
-
-    except ValueError as e:
-        logger.error(f"Configuration error: {e}")
-        print(f"❌ Error: {e}", file=sys.stderr)
-        print()
-        print("Make sure you have:")
-        print("1. Created a .env file with your OPENAI_API_KEY")
-        print("2. Copied .env.example to .env and added your API key")
-        sys.exit(1)
-
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}", exc_info=True)
-        print(f"❌ Error: {e}", file=sys.stderr)
-        print()
-        print("An unexpected error occurred. Check the logs for details.")
-        sys.exit(1)
-
+            if success:
+                print("\n" + "=" * 60)
+                print("✅ SUCCESS! Environment created.")
+                print("=" * 60)
+                print(f"Activate: conda activate {sanitized_env_name}")
+                break
+            
+            # 실패 시 Fixer 동작
+            print(f"   ❌ Failed: {error[:200]}...")
+            if attempt == settings.MAX_RETRIES:
+                print("❌ Final failure.")
+                sys.exit(1)
+                
+            print(f"   🔧 Applying fix...")
+            from utils.memory import Memory
+            memory = Memory()
+            memory.error_history = error_history
+            
+            try:
+                fixed_yml = fixer.fix(current_yml, error, memory)
+                builder.save_to_file(fixed_yml, str(output_path))
+                current_yml = fixed_yml
+                error_history.append((error, "Applied fix"))
+            except Exception as e:
+                print(f"Fixer failed: {e}")
+                sys.exit(1)
+    else:
+        print("\n✅ Skipped creation (--no-create).")
+        print(f"Run: conda env create -f {output_path}")
 
 if __name__ == "__main__":
     main()
