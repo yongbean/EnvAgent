@@ -1,4 +1,4 @@
-EnvAgent
+# EnvAgent
 Automatic Conda environment.yml generator that analyzes Python projects using AI-powered dependency analysis with automatic error fixing.
 Stop manually managing conda environments! EnvAgent automatically scans your Python project, detects all dependencies, and creates a working conda environment with automatic error fixing.
 Quick Start
