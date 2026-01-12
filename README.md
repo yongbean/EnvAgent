@@ -124,8 +124,3 @@ EnvAgent uses a 6-step pipeline to generate environments:
 - [ARCHITECTURE.md](ARCHITECTURE.md) - System architecture and technical details
 - [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines
 
-**Need help?** [Open an issue](https://github.com/yourusername/EnvAgent/issues) for support.
-
----
-
-**Made with ❤️ using GPT-4 and Python AST**
