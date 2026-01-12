@@ -3,7 +3,6 @@
 **AI-powered tool that automatically generates Conda environments for Python projects**
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 EnvAgent analyzes your Python codebase and creates production-ready Conda environments automatically. It uses GPT-4 for intelligent dependency detection, handles version conflicts, and self-heals installation errors.
 
@@ -121,11 +120,11 @@ EnvAgent uses a 6-step pipeline to generate environments:
 
 ## Documentation
 
-- [FLOW_ARCHITECTURE.md](FLOW_ARCHITECTURE.md) - Detailed system architecture and data flow
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Design decisions and technical innovations
-- [QUICK_REFERENCE.md](QUICK_REFERENCE.md) - Quick reference guide
+- [FLOW_ARCHITECTURE.md](FLOW_ARCHITECTURE.md) - Detailed execution flow with step-by-step diagrams
+- [ARCHITECTURE.md](ARCHITECTURE.md) - System architecture and technical details
+- [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines
 
-**Troubleshooting?** Check the [Wiki](https://github.com/yourusername/EnvAgent/wiki) or [open an issue](https://github.com/yourusername/EnvAgent/issues).
+**Need help?** [Open an issue](https://github.com/yourusername/EnvAgent/issues) for support.
 
 ---
 

@@ -136,7 +136,7 @@ environment.yml
       │
       ↓
 ┌─────────────────────────────────────────────────────────┐
-│                   Retry Loop (MAX 5)                    │
+│                   Retry Loop (MAX 8)                    │
 │                                                          │
 │  Attempt 1:                                              │
 │    ┌──────────────────┐                                 │
@@ -159,7 +159,7 @@ environment.yml
 │  Attempt 2: (repeat with fixed yml)                     │
 │    ...                                                   │
 │                                                          │
-│  Attempt 5: Last chance                                 │
+│  Attempt 8: Last chance                                 │
 │    SUCCESS? ──→ DONE!                                   │
 │    FAILED? ──→ GIVE UP                                  │
 └─────────────────────────────────────────────────────────┘
@@ -259,7 +259,7 @@ Response: Fixed YAML content
 
 API Call 4: EnvironmentFixer (Attempt 2)
   ↓
-[... up to 5 attempts total ...]
+[... up to 8 attempts total ...]
 ```
 
 ## File System Interactions
@@ -353,7 +353,7 @@ os.getenv("OPENAI_API_KEY")
 Settings class
   ↓
 settings.api_key ──→ All agents
-settings.MAX_RETRIES ──→ main.py retry loop
+settings.MAX_RETRIES=8 ──→ main.py retry loop
 ```
 
 ## Logging Architecture
@@ -393,19 +393,16 @@ EnvAgent is a **modular, well-architected system** with:
 
 ---
 
-# EnvAgent v2.0 - NEW Token-Efficient Architecture
+## Token-Efficient Architecture
 
-## What's New in v2.0?
+EnvAgent uses a **token-efficient architecture** that processes files **individually** instead of sending all files at once.
 
-v2.0 introduces a **token-efficient architecture** that solves the token limit issues by processing files **one-by-one** instead of sending all files at once.
+### Key Features
+- ✅ Handles ANY project size by processing files individually
+- ✅ No token limits even with 1000+ files
+- ✅ Efficient 6-step pipeline
 
-### Key Problems Solved
-- ❌ **v1.0**: Token limit exceeded on large projects (1000+ files)
-- ✅ **v2.0**: Handles ANY project size by processing files individually
-
----
-
-## New Architecture Flow
+## Architecture Flow
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -446,7 +443,7 @@ v2.0 introduces a **token-efficient architecture** that solves the token limit i
 
 ---
 
-## New Components
+## Components
 
 ### 1. SystemChecker (`utils/system_checker.py`)
 
@@ -543,40 +540,32 @@ Unique imports: torch, numpy, pandas
 
 ---
 
-### 5. Updated EnvironmentBuilder
+### 5. EnvironmentBuilder
 
-**New Method**: `build_from_summary(summary_path, project_name, python_version)`
+**Key Method**: `build_from_summary(summary_path, project_name, python_version)`
 
 **Input**: `dependency_summary.txt` (compact!)
 
-**vs v1.0**:
-- v1.0: Sends ALL source files → 50K tokens
-- v2.0: Sends summary only → 3K tokens
+**Efficiency**:
+- Processes individual files with AST → Small token usage per file
+- Sends summary only → ~3K tokens total
 
 ---
 
-## Token Efficiency Comparison
+## Token Efficiency
 
-### v1.0 Architecture
-```
-Call 1: ProjectAnalyzer.analyze(ALL_FILES)
-  Input: 50,000+ tokens ❌ HUGE!
-  Risk: Token limit exceeded
+EnvAgent's architecture ensures efficient token usage:
 
-Total: 1-5 LLM calls, first is MASSIVE
-```
-
-### v2.0 Architecture
 ```
 Call 1: DecisionAgent.decide(README)
-  Input: ~1,000 tokens ✅ Small
+  Input: ~1,000 tokens
 
 Call 2-N: CodeScannerAgent (one per file)
-  Input: ~500 tokens each ✅ Small
+  Input: ~500 tokens each
   N = number of files
 
 Call N+1: EnvironmentBuilder.build_from_summary()
-  Input: ~3,000 tokens ✅ Small
+  Input: ~3,000 tokens
 
 Total: 3+N calls, ALL are small
 ```
@@ -585,87 +574,62 @@ Total: 3+N calls, ALL are small
 
 ---
 
-## Performance Comparison
+## Performance
 
-| Project Size | v1.0 Result | v2.0 Result |
-|-------------|-------------|-------------|
-| 10 files    | ✅ 15s      | ✅ 25s      |
-| 50 files    | ✅ 30s      | ✅ 60s      |
-| 100 files   | ✅ 60s      | ✅ 120s     |
-| 500 files   | ❌ FAIL     | ✅ 600s     |
-| 1000 files  | ❌ FAIL     | ✅ 1200s    |
+| Project Size | Processing Time |
+|-------------|-----------------|
+| 10 files    | ~25s            |
+| 50 files    | ~60s            |
+| 100 files   | ~120s           |
+| 500 files   | ~600s (10 min)  |
+| 1000 files  | ~1200s (20 min) |
 
-**Trade-off**: Slower, but guaranteed to work on large projects
+**Scales to any project size**
 
 ---
 
 ## Usage
 
-### v1.0 (Old)
 ```bash
 python main.py ./my_project
-```
-
-### v2.0 (New)
-```bash
-python main_new.py ./my_project
 
 # Options
-python main_new.py ./my_project --python-version 3.10
-python main_new.py ./my_project --no-create
-python main_new.py ./my_project -n custom_env
+python main.py ./my_project --python-version 3.10
+python main.py ./my_project --no-create
+python main.py ./my_project -n custom_env
 ```
 
 ---
 
-## File Structure Changes
+## File Structure
 
 ```
 EnvAgent/
 ├── agents/
-│   ├── project_analyzer.py      # OLD (v1.0)
-│   ├── decision_agent.py        # NEW ✨
-│   ├── code_scanner.py          # NEW ✨
-│   ├── env_builder.py           # UPDATED ✨
-│   └── env_fixer.py             # UNCHANGED
+│   ├── decision_agent.py        # Analyzes project structure
+│   ├── code_scanner.py          # Scans files individually
+│   ├── env_builder.py           # Generates environment.yml
+│   └── env_fixer.py             # Auto-fixes errors
 ├── utils/
-│   ├── system_checker.py        # NEW ✨
-│   ├── file_filter.py           # NEW ✨
-│   ├── local_reader.py          # OLD (v1.0)
-│   └── ...
-├── main.py                      # OLD (v1.0)
-├── main_new.py                  # NEW ✨
-└── ARCHITECTURE.md              # THIS FILE
+│   ├── system_checker.py        # Pre-flight validation
+│   ├── file_filter.py           # Filters relevant files
+│   ├── conda_executor.py        # Executes conda commands
+│   ├── dependency_collector.py  # Collects dependencies
+│   ├── helpers.py               # Helper functions
+│   ├── local_reader.py          # File I/O
+│   └── memory.py                # State management
+├── config/
+│   └── settings.py              # Configuration
+└── main.py                      # CLI entry point
 ```
 
 ---
 
-## When to Use Which Version?
-
-### Use v1.0 (`main.py`)
-- ✅ Small projects (< 50 files)
-- ✅ Need stable, tested version
-- ✅ Want minimal LLM calls
-
-### Use v2.0 (`main_new.py`)
-- ✅ Large projects (100+ files)
-- ✅ Hitting token limits
-- ✅ Want early exit optimization
-- ✅ Want dependency summary for debugging
-
----
-
-## Benefits of v2.0
+## Key Benefits
 
 1. **Scalability**: Handles projects of ANY size
 2. **Token Efficiency**: No token limit issues
 3. **Early Exit**: Stops if environment file exists
 4. **System Check First**: Validates before LLM calls
 5. **Debuggability**: Generates `dependency_summary.txt`
-6. **Separation of Concerns**: Clear component boundaries
-
----
-
-## Conclusion
-
-v2.0 maintains all v1.0 functionality while solving the fundamental scalability issue through **incremental processing** instead of **batch processing**.
+6. **Self-Healing**: Auto-fixes errors with up to 8 retries
