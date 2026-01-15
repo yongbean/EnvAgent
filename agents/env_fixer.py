@@ -9,6 +9,7 @@ from openai import OpenAI
 
 from config.settings import settings
 from utils.memory import Memory
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ Your goal is to fix the `environment.yml` not just by reacting to errors, but by
         self.client = OpenAI(api_key=settings.api_key)
         logger.info("EnvironmentFixer initialized")
 
-    def fix(self, current_yml: str, error_message: str, memory: Memory, system_context: str = "Unknown") -> str:
+    def fix(self, current_yml: str, error_message: str, memory: Memory, system_context: Any = "Unknown") -> str:
         """
         Generate a fixed environment.yml based on the error.
         """

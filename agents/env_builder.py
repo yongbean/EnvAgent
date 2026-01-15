@@ -125,7 +125,7 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
         project_name: str = "my_project",
         python_version: Optional[str] = None,
         repo_root: Optional[str] = None,
-        system_context: str = "Unknown"  # <-- New argument
+        system_context: Any = "Unknown"  # <-- accept dict or str
     ) -> str:
         """
         Generate environment.yml content from a dependency summary file.
@@ -135,8 +135,12 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
         summary_content = self._read_text(summary_path)
         sanitized_name = sanitize_env_name(project_name)
         
-        # [New] CUDA hint with OS check
-        cuda_version = self._infer_cuda(summary_content)
+        # [New] Active GPU detection
+        cuda_version = self._infer_cuda(summary_content, system_context)
+
+        # [New] Hardware Compatibility Warning
+        self._check_hardware_compatibility(summary_content, system_context)
+
 
         # Python version inference
         inferred_py = self._infer_python_version(
@@ -167,7 +171,8 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
         project_name: str = "my_project",
         python_version: str = "3.9",
         target_directory: Optional[str] = None,
-        root_directory: Optional[str] = None
+        root_directory: Optional[str] = None,
+        system_context: Any = "Unknown"  # <-- New argument
     ) -> str:
         """
         Generate environment.yml content from existing environment files.
@@ -181,6 +186,11 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
             python_version=python_version,
             collected_content=collected_content
         )
+
+        # [New] Hardware Compatibility Warning
+        self._check_hardware_compatibility(collected_content, system_context)
+
+
 
         env_content = self._call_llm(prompt)
         env_content = self._clean_markdown(env_content)
@@ -233,14 +243,86 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
     # ----------------------------
     # Helper: Inference Logic 
     # ----------------------------
-    def _infer_cuda(self, summary_content: str) -> str:
-        if platform.system() == "Darwin":
-            logger.info("🍎 macOS detected! Skipping CUDA requirements.")
+    def _infer_cuda(self, summary_content: str, system_context: Any) -> str:
+        """
+        Determine CUDA requirement based on active system check and code analysis.
+        system_context: Can be a dict (new) or string (legacy fallback).
+        """
+        # 1. Active Hardware Check (Priority)
+        if isinstance(system_context, dict):
+            gpu_info = system_context.get('gpu')
+            
+            if not gpu_info:
+                return "None (No active GPU detected)"
+                
+            if gpu_info['type'] == 'apple_silicon':
+                logger.info("🍎 macOS (Apple Silicon) detected! Skipping CUDA.")
+                return "None (Apple Silicon detected - Use MPS)"
+                
+            if gpu_info['type'] == 'nvidia':
+                logger.info(f"🎮 Active NVIDIA GPU detected: {gpu_info['details'][0]['name']}")
+                # Default to 11.8 if code needs it, otherwise let conda decide
+                if "CUDA Required: Yes" in summary_content or "True" in summary_content:
+                    return "CUDA 11.8 (Active NVIDIA GPU confirmed)"
+                else:
+                    return "None (NVIDIA GPU present but no CUDA code detected)"
+
+        # 2. Legacy/Fallback Logic (OS String Check)
+        context_str = str(system_context)
+        if "macOS" in context_str or "Darwin" in context_str:
+            logger.info("🍎 macOS detected (Legacy check)! Skipping CUDA requirements.")
             return "None (macOS detected - CUDA not supported, uses MPS/CPU)"
             
         if "CUDA Required: Yes" in summary_content or "True" in summary_content:
             return "CUDA 11.8 (Auto-detected)"
+            
         return "Not specified"
+
+    def _check_hardware_compatibility(self, summary_content: str, system_context: Any) -> None:
+        """
+        Check for mismatch between project requirements (inferred) and actual hardware.
+        Prints a warning if mismatch detected.
+        """
+        if not isinstance(system_context, dict):
+            return
+
+        gpu_info = system_context.get('gpu')
+        
+        # Check if project needs GPU
+        # 1. Check for explicit summary flag (from CodeScanner)
+        flag_in_summary = "CUDA Required: Yes" in summary_content or "True" in summary_content
+        
+        # 2. Check for keywords in raw content (from requirements.txt/environment.yml)
+        # matches: nvidia-*, tensorflow-gpu, torch(implies gpu potential), cuda
+        has_gpu_keywords = False
+        keywords = ['nvidia', 'cuda', 'tensorflow-gpu', 'torch', 'pytorch']
+        
+        # Simple string search might be enough for warning purposes
+        for kw in keywords:
+            if kw in summary_content.lower():
+                has_gpu_keywords = True
+                break
+                
+        needs_gpu = flag_in_summary or has_gpu_keywords
+        
+        if needs_gpu:
+
+            if not gpu_info:
+                print("\n" + "!" * 60)
+                print("⚠️  WARNING: Project requirements mismatch detected.")
+                print("   - Project likely requires: NVIDIA GPU (CUDA support)")
+                print("   - Your System: No active GPU detected.")
+                print("   - Result: Performance may be significantly degraded (CPU only).")
+                print("!" * 60 + "\n")
+            
+            elif gpu_info['type'] == 'apple_silicon':
+                print("\n" + "!" * 60)
+                print("⚠️  WARNING: Project requirements mismatch detected.")
+                print("   - Project likely requires: NVIDIA GPU (CUDA support)")
+                print("   - Your System: macOS (Apple Silicon) - CUDA not supported.")
+                print("   - Action: Adapting environment to use CPU/MPS (Metal Performance Shaders).")
+                print("   - Result: Training may be slower than on NVIDIA GPUs.")
+                print("!" * 60 + "\n")
 
     def _infer_python_version(self, summary_content: str, repo_root: Optional[str]) -> str:
         hint = self._extract_python_hint_from_summary(summary_content)

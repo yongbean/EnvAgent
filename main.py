@@ -50,10 +50,10 @@ def validate_directory(path_str: str) -> Path:
 
 # --- Core Phases ---
 
-def run_system_check() -> str:
+def run_system_check() -> dict:
     """
     Step 0: Pre-flight system validation.
-    Returns: The detected system context string (e.g., 'macOS (arm64) - Apple M4').
+    Returns: The detected system details dictionary with GPU info.
     """
     print("🔍 Step 0/6: Checking system requirements...")
     checker = SystemChecker()
@@ -83,7 +83,7 @@ def analyze_structure(root_path: Path) -> dict:
     decision['target_path_obj'] = target_dir 
     return decision
 
-def process_existing_files(decision: dict, project_name: str, py_version: str, root_path: Path, output_path: Path) -> str:
+def process_existing_files(decision: dict, project_name: str, py_version: str, root_path: Path, output_path: Path, system_context: dict) -> str:
     """Case A: Handle projects with existing setup files."""
     print("\n" + "=" * 60)
     print("✅ Valid environment setup found!")
@@ -101,13 +101,15 @@ def process_existing_files(decision: dict, project_name: str, py_version: str, r
         project_name=project_name,
         python_version=py_version,
         target_directory=str(target_dir),
-        root_directory=str(root_path)
+        root_directory=str(root_path),
+        system_context=system_context # <-- New argument
     )
+
     builder.save_to_file(env_content, str(output_path))
     print(f"   ✓ Saved to: {output_path}")
     return env_content
 
-def process_deep_analysis(target_dir: Path, output_dir: Path, project_name: str, py_version: str, output_path: Path, system_context: str) -> str:
+def process_deep_analysis(target_dir: Path, output_dir: Path, project_name: str, py_version: str, output_path: Path, system_context: dict) -> str:
     """Case B: Deep scan of source code."""
     print(f"\n   ✓ Proceeding with code analysis in: {target_dir.name}")
 
@@ -141,7 +143,7 @@ def process_deep_analysis(target_dir: Path, output_dir: Path, project_name: str,
     print(f"   ✓ Saved to: {output_path}")
     return env_content
 
-def create_environment_with_retry(env_name: str, output_path: Path, initial_yml: str, system_context: str) -> None:
+def create_environment_with_retry(env_name: str, output_path: Path, initial_yml: str, system_context: dict) -> None:
     """Step 5: Create environment with self-healing loop."""
     print(f"\n🚀 Step 5/6: Creating conda environment '{env_name}'...")
     
@@ -216,7 +218,7 @@ def main() -> None:
     
     # 2. Generate YAML Content
     if decision["has_env_setup"] and not decision["proceed_with_analysis"]:
-        env_content = process_existing_files(decision, project_name, args.python_version, root_path, output_path)
+        env_content = process_existing_files(decision, project_name, args.python_version, root_path, output_path, system_context)
     else:
         # Pass system_context to deep analysis (Builder Agent)
         env_content = process_deep_analysis(

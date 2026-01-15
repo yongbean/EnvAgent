@@ -34,6 +34,69 @@ class SystemChecker:
         else:
             return f"{self.os_type} ({platform.machine()})"
 
+    def check_nvidia_gpu(self) -> dict:
+        """Check for NVIDIA GPU using nvidia-smi."""
+        try:
+            # query-gpu=name,driver_version,memory.total
+            cmd = ["nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                # Example output: "Tesla T4, 450.51.06, 15109 MiB"
+                lines = result.stdout.strip().split('\n')
+                gpus = []
+                for line in lines:
+                    parts = [x.strip() for x in line.split(',')]
+                    if len(parts) >= 3:
+                        gpus.append({
+                            "name": parts[0],
+                            "driver": parts[1],
+                            "memory": parts[2]
+                        })
+                return {"type": "nvidia", "count": len(gpus), "details": gpus}
+        except FileNotFoundError:
+            pass  # nvidia-smi not found
+        except Exception as e:
+            logger.warning(f"NVIDIA check failed: {e}")
+            
+        return None
+
+    def check_macos_gpu(self) -> dict:
+        """Check for macOS GPU using system_profiler."""
+        if self.os_type != "Darwin":
+            return None
+            
+        try:
+            # Get display info in JSON format (more reliable if available, but parsing text is safer across versions)
+            # We'll use text parsing for broader compatibility or try JSON if possible.
+            # Let's use simple grep for basic info first to avoid huge output parsing
+            cmd = ["system_profiler", "SPDisplaysDataType"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            
+            if result.returncode == 0:
+                output = result.stdout
+                # Naive parse for Chipset / Metal Support
+                gpu_name = "Unknown"
+                metal_support = "Unknown"
+                
+                for line in output.split('\n'):
+                    line = line.strip()
+                    if line.startswith("Chipset Model:"):
+                        gpu_name = line.replace("Chipset Model:", "").strip()
+                    elif line.startswith("Metal Support:"):
+                        metal_support = line.replace("Metal Support:", "").strip()
+                
+                if gpu_name != "Unknown":
+                    return {
+                        "type": "apple_silicon" if "Apple" in gpu_name else "amd/intel", 
+                        "name": gpu_name, 
+                        "metal": metal_support
+                    }
+        except Exception as e:
+            logger.warning(f"macOS GPU check failed: {e}")
+            
+        return None
+
     def check_conda_installed(self) -> Tuple[bool, str]:
         """
         Check if conda is installed and accessible.
@@ -85,16 +148,37 @@ class SystemChecker:
         else:
             return False, f"Python {version_str} is too old. Python 3.7+ required."
 
-    def run_all_checks(self) -> Tuple[bool, List[str], str]:
+    def run_all_checks(self) -> Tuple[bool, List[str], dict]:
         """
         Run all system checks before starting.
-        Returns: (all_passed, messages, system_info_string)
+        Returns: (all_passed, messages, system_info_dict)
         """
         messages = []
         all_passed = True
+        
+        system_details = {
+            "os": self.os_type,
+            "chip": self.chip_info,
+            "gpu": None
+        }
 
         # 1. System Context Detection
         messages.append(f"💻 System Detected: {self.chip_info}")
+        
+        # Check for GPU
+        nvidia_gpu = self.check_nvidia_gpu()
+        macos_gpu = self.check_macos_gpu()
+        
+        if nvidia_gpu:
+            system_details['gpu'] = nvidia_gpu
+            gpu_names = ", ".join([g['name'] for g in nvidia_gpu['details']])
+            messages.append(f"   🎮 NVIDIA GPU Detected: {gpu_names} (Driver: {nvidia_gpu['details'][0]['driver']})")
+        elif macos_gpu:
+            system_details['gpu'] = macos_gpu
+            messages.append(f"   🍎 macOS GPU Detected: {macos_gpu['name']} (Metal: {macos_gpu['metal']})")
+        else:
+            messages.append("   ⚠️  No active GPU detected (Code analysis will determine needs)")
+
         if "Apple" in self.chip_info and "M" in self.chip_info:
              messages.append("   👉 Apple Silicon detected. Will prioritize 'conda-forge'.")
 
@@ -112,4 +196,4 @@ class SystemChecker:
         success, msg = self.check_disk_space()
         messages.append(("✓" if success else "⚠") + f" {msg}")
 
-        return all_passed, messages, self.chip_info
+        return all_passed, messages, system_details
